@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { ArrowLeftIcon, DownloadIcon, ExternalIcon, PinIcon, TrashIcon } from "@/components/icons";
-import { circlePoints, parseLatLng } from "@/lib/circle";
+import { circlePoints, fillPoints, parseLatLng, type Point } from "@/lib/circle";
 import { deleteProfile, useProfiles } from "@/lib/profiles";
 import { buildRows, downloadManyXlsx, downloadXlsx, HEADERS } from "@/lib/sheet";
 import { btn, btnLight, card, input, timeAgo } from "@/lib/ui";
@@ -15,7 +15,21 @@ const RADIUS_SETS = [
   [50, 100, 200, 300, 400],
   ...Array.from({ length: 8 }, (_, k) => Array.from({ length: 5 }, (_, j) => 500 * (k + 1) + 100 * j)),
 ];
-const setLabel = (radii: number[]) => `${radii[0]}–${radii.at(-1)} m`;
+const POINTS_PER_SET = 5 * 360;
+
+// "fill" spreads a set's 1800 points over its whole band so the inside is covered too:
+// set 1 fills 50–400 m, set 2 400–900 m, ... set 9 3900–4400 m (no gaps between sets).
+// "rings" puts 360 points on each of the 5 circles only.
+type Mode = "fill" | "rings";
+const band = (i: number) => [i === 0 ? RADIUS_SETS[0][0] : RADIUS_SETS[i - 1].at(-1)!, RADIUS_SETS[i].at(-1)!] as const;
+const setLabel = (i: number, mode: Mode) => {
+  const [from, to] = mode === "fill" ? band(i) : [RADIUS_SETS[i][0], RADIUS_SETS[i].at(-1)];
+  return `${from}–${to} m`;
+};
+const setPoints = (center: Point, i: number, mode: Mode) =>
+  mode === "fill"
+    ? fillPoints(center, ...band(i), POINTS_PER_SET)
+    : RADIUS_SETS[i].flatMap((r) => circlePoints(center, r));
 
 function StepTitle({ n, done, title, hint }: { n: number; done: boolean; title: string; hint?: string }) {
   return (
@@ -55,22 +69,26 @@ export default function FileTool({ id }: { id: string }) {
   const { profiles, loaded } = useProfiles();
   const [coord, setCoord] = useState("");
   const [setIndex, setSetIndex] = useState(0);
+  const [mode, setMode] = useState<Mode>("fill");
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [showDesc, setShowDesc] = useState(false);
 
   const profile = profiles.find((p) => p.id === id);
   const center = parseLatLng(coord);
   const radii = RADIUS_SETS[setIndex];
-  const points = center ? radii.flatMap((r) => circlePoints(center, r)) : [];
+  const points = center ? setPoints(center, setIndex, mode) : [];
   const rows = profile ? buildRows(profile.names, profile.descriptions, points) : [];
+  const fileName = (i: number) => `${profile?.title} ${setLabel(i, mode).replace("–", "-").replace(" ", "")}.xlsx`;
+  const [bandFrom, bandTo] = band(setIndex);
+  const spacing = Math.round(Math.sqrt((Math.PI * (bandTo ** 2 - bandFrom ** 2)) / POINTS_PER_SET));
 
   async function downloadAll() {
     if (!profile || !center) return;
     setDownloadingAll(true);
     try {
-      const files = RADIUS_SETS.map((set, i) => ({
-        name: `${i + 1}. ${profile.title} ${set[0]}-${set.at(-1)}m.xlsx`,
-        rows: buildRows(profile.names, profile.descriptions, set.flatMap((r) => circlePoints(center, r))),
+      const files = RADIUS_SETS.map((_, i) => ({
+        name: `${i + 1}. ${fileName(i)}`,
+        rows: buildRows(profile.names, profile.descriptions, setPoints(center, i, mode)),
       }));
       await downloadManyXlsx(files);
     } finally {
@@ -183,9 +201,37 @@ export default function FileTool({ id }: { id: string }) {
           </div>
 
           <div className="p-5 sm:p-6">
-            <StepTitle n={2} done={!!center} title="Radius set" hint="Har set = 5 radius × 360 points = 1 file" />
+            <StepTitle
+              n={2}
+              done={!!center}
+              title="Radius set"
+              hint={
+                mode === "fill"
+                  ? `Har set = ${POINTS_PER_SET} points poore area mein = 1 file`
+                  : "Har set = 5 radius × 360 points = 1 file"
+              }
+            />
+            <div className="mb-3 inline-flex rounded-lg border border-line bg-surface-2 p-1 text-sm">
+              {(
+                [
+                  ["fill", "Poora area"],
+                  ["rings", "Sirf rings"],
+                ] as const
+              ).map(([m, label]) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  aria-pressed={mode === m}
+                  className={`cursor-pointer rounded-md px-3 py-1.5 font-medium transition ${
+                    mode === m ? "bg-surface text-accent shadow-sm" : "text-muted hover:text-foreground"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {RADIUS_SETS.map((set, i) => (
+              {RADIUS_SETS.map((_, i) => (
                 <button
                   key={i}
                   onClick={() => setSetIndex(i)}
@@ -197,12 +243,14 @@ export default function FileTool({ id }: { id: string }) {
                   }`}
                 >
                   <span className={`block text-[11px] ${i === setIndex ? "text-accent" : "text-muted"}`}>Set {i + 1}</span>
-                  <span className={`text-sm font-medium ${i === setIndex ? "text-accent" : ""}`}>{setLabel(set)}</span>
+                  <span className={`text-sm font-medium ${i === setIndex ? "text-accent" : ""}`}>{setLabel(i, mode)}</span>
                 </button>
               ))}
             </div>
             <p className="mt-3 text-xs text-muted">
-              Rows ka order: {radii.map((r) => `${r} m`).join(" → ")}
+              {mode === "fill"
+                ? `${bandFrom}–${bandTo} m ka poora area, har point lagbhag ${spacing} m door · Rows andar se bahar ki taraf`
+                : `Rows ka order: ${radii.map((r) => `${r} m`).join(" → ")}`}
             </p>
           </div>
         </section>
@@ -220,14 +268,16 @@ export default function FileTool({ id }: { id: string }) {
                   "Coordinate daalo"
                 )}
               </Check>
-              <Check ok>Set {setIndex + 1} · {setLabel(radii)}</Check>
+              <Check ok>
+                Set {setIndex + 1} · {setLabel(setIndex, mode)} · {mode === "fill" ? "poora area" : "rings"}
+              </Check>
               <Check ok={points.length > 0}>{points.length > 0 ? `${points.length} rows ready` : "Rows banengi"}</Check>
             </ul>
             <div className="flex flex-col gap-2">
               <button
                 className={btn}
                 disabled={points.length === 0}
-                onClick={() => downloadXlsx(`${profile.title} ${radii[0]}-${radii.at(-1)}m.xlsx`, rows)}
+                onClick={() => downloadXlsx(fileName(setIndex), rows)}
               >
                 <DownloadIcon /> Download Set {setIndex + 1}
               </button>
