@@ -11,8 +11,15 @@ const globalForMongo = globalThis as unknown as { mongoClient?: Promise<MongoCli
 async function collection() {
   const uri = process.env.MONGODB_URI;
   if (!uri) throw new Error("MONGODB_URI .env.local mein set nahi hai");
-  globalForMongo.mongoClient ??= new MongoClient(uri).connect();
-  const client = await globalForMongo.mongoClient;
+  // give up after 8s so the error reaches the browser before Vercel's function timeout
+  globalForMongo.mongoClient ??= new MongoClient(uri, { serverSelectionTimeoutMS: 8000 }).connect();
+  let client: MongoClient;
+  try {
+    client = await globalForMongo.mongoClient;
+  } catch (e) {
+    globalForMongo.mongoClient = undefined; // don't keep a failed connection; retry on the next request
+    throw e;
+  }
   return client.db(process.env.MONGODB_DB || "gmb").collection<ProfileDoc>("profiles");
 }
 

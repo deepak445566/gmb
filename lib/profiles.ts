@@ -27,13 +27,22 @@ export function parseProfiles(raw: string): Profile[] {
   }
 }
 
+// The API answers {"error": "..."}, but a host timeout or crash page isn't JSON
+function errorMessage(status: number, body: string) {
+  try {
+    return JSON.parse(body).error ?? `HTTP ${status}`;
+  } catch {
+    return `HTTP ${status}${status === 504 ? " (server timeout – database tak connection nahi ho paya)" : ""}`;
+  }
+}
+
 async function post(profile: Profile) {
   const res = await fetch(API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(profile),
   });
-  if (!res.ok) throw new Error(`Save fail (${res.status})`);
+  if (!res.ok) throw new Error(`Save fail: ${errorMessage(res.status, await res.text())}`);
 }
 
 // Moves anything still in this browser's localStorage into the database, once.
@@ -55,7 +64,7 @@ async function migrateLegacy(existing: Profile[]) {
 async function fetchAll() {
   const res = await fetch(API);
   const body = await res.text();
-  if (!res.ok) throw new Error(JSON.parse(body).error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(errorMessage(res.status, body));
   return parseProfiles(body);
 }
 
@@ -93,7 +102,9 @@ export function saveProfile(profile: Profile) {
   // newest first, same order the database returns
   const saved = { ...profile, updatedAt: new Date().toISOString() };
   set([saved, ...parseProfiles(snapshot).filter((p) => p.id !== profile.id)]);
-  post(profile).catch(() => alert(`"${profile.title}" database mein save nahi hui. Dobara import karo.`));
+  post(profile).catch((e) =>
+    alert(`"${profile.title}" database mein save nahi hui. Dobara import karo.\n\n${e instanceof Error ? e.message : e}`),
+  );
 }
 
 export function deleteProfile(id: string) {
